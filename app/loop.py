@@ -292,6 +292,28 @@ def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
     return None, None
 
 
+def _blocklist_on_repeated_failure(movie_id: int, title: str | None,
+                                   limit: int) -> bool:
+    """Circuit breaker for a grab that keeps failing. Most often the chosen
+    release was pulled from the indexer (Newznab 300 "No such file"), so it can
+    never succeed and would be re-selected every loop. After `limit` consecutive
+    failed grabs, park the title on the blocklist -- reversible from the
+    Blocklist page -- and log it so the loop stops hammering a dead release.
+    Returns True when it blocklisted. `limit <= 0` disables the breaker."""
+    if limit <= 0:
+        return False
+    streak = db.demote_failure_streak(movie_id)
+    if streak < limit:
+        return False
+    db.blocklist_add(movie_id, title=title,
+                     reason=f"auto: {streak} consecutive grab failures")
+    db.record_action(movie_id=movie_id, title=title, action="blocklist",
+                     dry_run=False, status="blocklisted",
+                     detail=f"auto-blocklisted after {streak} consecutive "
+                            f"failed grabs -- release likely pulled from indexer")
+    return True
+
+
 def run_once(force: bool = False) -> dict:
     settings = db.all_settings()
     dry = bool(settings.get("dry_run", True))
@@ -362,6 +384,8 @@ def run_once(force: bool = False) -> dict:
                           "score": c.score, "dry_run": False})
         except Exception as e:  # noqa: BLE001
             db.update_action(aid, "failed", str(e)[:300])
+            _blocklist_on_repeated_failure(
+                c.id, c.title, int(settings.get("max_grab_failures", 3)))
 
         time.sleep(float(settings["search_throttle_seconds"]))
 
@@ -487,7 +511,8 @@ def _protected_ids(radarr: Radarr, settings: dict, movies: list[dict]) -> set[in
 
 def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
                   queued: set[int], protected: set[int],
-                  dry: bool, batch: int, throttle: float, depth: int = 0) -> dict:
+                  dry: bool, batch: int, throttle: float, depth: int = 0,
+                  max_failures: int = 0) -> dict:
     """Force-grab the target tier for cutoff-unmet titles on one profile. No
     profile switch -- rules/user already assigned them; this is only the
     search+grab Radarr won't do automatically."""
@@ -525,6 +550,7 @@ def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
             acted.append(m.get("title"))
         except Exception as e:  # noqa: BLE001
             db.update_action(aid, "failed", str(e)[:300])
+            _blocklist_on_repeated_failure(m["id"], m.get("title"), max_failures)
         time.sleep(throttle)
     return {"profile": profile["name"], "target": target,
             "grabbed": acted, "remaining": len(pending)}
@@ -555,7 +581,8 @@ def run_managed(force: bool = False) -> dict:
     results, grabbed, remaining = [], 0, 0
     for prof in managed_grab_profiles(radarr, settings):
         r = _grab_profile(radarr, prof, movies, queued, protected, dry, batch,
-                          throttle, depth)
+                          throttle, depth,
+                          int(settings.get("max_grab_failures", 3)))
         results.append(r)
         grabbed += len(r["grabbed"])
         remaining += r["remaining"]

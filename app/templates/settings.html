@@ -74,7 +74,18 @@
       <input type="number" name="search_throttle_seconds" value="{{ settings.search_throttle_seconds }}"></label>
     <label><span>Tier fallback depth</span>
       <input type="number" name="tier_fallback_depth" min="0" value="{{ settings.tier_fallback_depth }}"></label>
+    <label><span>Max grab failures before auto-blocklist</span>
+      <input type="number" name="max_grab_failures" min="0" value="{{ settings.max_grab_failures }}"></label>
   </div>
+  <p class="dim" style="margin:10px 0 0">
+    <strong>Max grab failures</strong> is the circuit breaker for a demotion whose
+    grab keeps failing &mdash; usually because the chosen release was pulled from
+    the indexer (Newznab error 300 &ldquo;No such file&rdquo;), so re-grabbing it
+    can never succeed. After this many consecutive failed grabs the title is
+    auto-blocklisted so the loop stops re-selecting a dead release every pass. It
+    shows on the Blocklist page with an <code>auto:</code> reason and can be
+    removed there to retry. 0 disables the breaker.
+  </p>
   <p class="dim" style="margin:10px 0 0">
     <strong>Tier fallback depth</strong> is how many tiers below the profile's top
     quality a demotion may settle for when the top tier has no release. At 0 a

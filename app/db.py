@@ -55,6 +55,14 @@ DEFAULTS: dict[str, Any] = {
     # current tier, so it can only ever pick something smaller.
     "tier_fallback_depth": 3,
 
+    # A demotion grab can fail permanently -- most often the chosen release was
+    # pulled from the indexer (Newznab error 300 "No such file"), so re-grabbing
+    # it can never succeed. Without a circuit breaker the title stays the top
+    # candidate and gets re-selected and re-grabbed every single loop forever.
+    # After this many consecutive failed grabs the title is auto-blocklisted
+    # (reversible from the Blocklist page) so the loop moves on. 0 disables it.
+    "max_grab_failures": 3,
+
     # Radarr refuses to IMPORT a downgrade even after the profile changes, and
     # parks the finished download waiting for a manual import. When on, the
     # curator clears those itself: delete the old file, then ManualImport. A
@@ -323,6 +331,24 @@ def update_action(action_id: int, status: str, detail: str | None = None) -> Non
         (status, detail, action_id),
     )
     c.commit()
+
+
+def demote_failure_streak(movie_id: int) -> int:
+    """Consecutive most-recent live demote attempts for a movie that failed.
+    Any non-failed demote row (grabbed/dry-run) resets the streak to zero, so a
+    title that later succeeds -- or is retried successfully -- is never counted
+    against its earlier failures."""
+    rows = conn().execute(
+        "SELECT status FROM manifest WHERE movie_id=? AND action='demote' "
+        "AND dry_run=0 ORDER BY ts DESC, id DESC",
+        (int(movie_id),),
+    ).fetchall()
+    n = 0
+    for r in rows:
+        if r["status"] != "failed":
+            break
+        n += 1
+    return n
 
 
 def blocklist_add(movie_id: int, tmdb_id: int | None = None,
