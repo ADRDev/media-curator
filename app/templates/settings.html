@@ -81,6 +81,11 @@
     <input type="checkbox" name="allow_same_tier_downgrades" {{ 'checked' if settings.allow_same_tier_downgrades }}>
     Allow smaller releases within the current quality tier
   </label>
+  <div class="grid" style="margin-top:12px">
+    <label><span>Same-tier minimum size reduction (%)</span>
+      <input type="number" name="same_tier_min_reduction_pct" min="0" max="99" step="1"
+             value="{{ settings.same_tier_min_reduction_pct }}"></label>
+  </div>
   <p class="dim" style="margin:10px 0 0">
     <strong>Max grab failures</strong> is the circuit breaker for a demotion whose
     grab keeps failing &mdash; usually because the chosen release was pulled from
@@ -101,8 +106,12 @@
   <p class="dim" style="margin:10px 0 0">
     <strong>Same-tier downgrades</strong> also considers a smaller release with the
     same quality label, such as replacing a 20&nbsp;GB Bluray-1080p file with a
-    4&nbsp;GB Bluray-1080p release. The existing size check still rejects releases
-    that are not smaller.
+    4&nbsp;GB Bluray-1080p release. Two releases in the same tier are often nearly
+    the same size, so a plain "smaller" check isn't enough &mdash;
+    <strong>same-tier minimum size reduction</strong> requires the replacement to
+    be smaller by at least this percentage of the current file (default 50%)
+    before it counts as a real downgrade. Only applies when same-tier downgrades
+    are on; a true tier drop has no such floor.
   </p>
 </div>
 

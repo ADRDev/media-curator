@@ -102,6 +102,30 @@ r, tier = loop._pick_release(
     max_bytes=int(20 * GB))
 check("same-tier mode still refuses a same-or-larger replacement", r is None)
 
+# Configurable minimum-reduction floor: two same-tier releases can be nearly
+# the same size, so a merely-smaller release isn't a real downgrade.
+r, tier = loop._pick_release(
+    FakeRadarr([rel("Bluray-1080p", 12)]), 1,
+    loop._tier_ladder(ARCHIVE_HD, "Bluray-1080p", 3, True),
+    max_bytes=int(13 * GB), same_tier="Bluray-1080p", same_tier_min_reduction=0.5)
+check("same-tier floor rejects a barely-smaller release", r is None)
+
+r, tier = loop._pick_release(
+    FakeRadarr([rel("Bluray-1080p", 6)]), 1,
+    loop._tier_ladder(ARCHIVE_HD, "Bluray-1080p", 3, True),
+    max_bytes=int(13 * GB), same_tier="Bluray-1080p", same_tier_min_reduction=0.5)
+check("same-tier floor accepts a release that clears the reduction bar",
+      tier == "Bluray-1080p")
+
+# The floor is scoped to the same-tier rung only -- a genuine lower-tier
+# fallback is unaffected even when it's only marginally smaller.
+r, tier = loop._pick_release(
+    FakeRadarr([rel("WEBDL-1080p", 12)]), 1,
+    loop._tier_ladder(ARCHIVE_HD, "Bluray-1080p", 3, True),
+    max_bytes=int(13 * GB), same_tier="Bluray-1080p", same_tier_min_reduction=0.5)
+check("the reduction floor doesn't apply to a genuine lower-tier fallback",
+      tier == "WEBDL-1080p")
+
 print("\n=== 3. blocked-import detection")
 STUCK = {
     "movieId": 42, "downloadId": "ABC123", "trackedDownloadState": "importPending",

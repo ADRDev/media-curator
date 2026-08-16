@@ -57,6 +57,12 @@ DEFAULTS: dict[str, Any] = {
     # Allow a smaller release with the same quality tier as the current file.
     # Off preserves strict tier downgrades only.
     "allow_same_tier_downgrades": False,
+    # How much smaller a same-tier release must be to qualify, as a percent of
+    # the current file's size. Two releases in the same quality tier are often
+    # nearly the same size, so "smaller by any amount" isn't a real downgrade
+    # -- it just burns a grab/import cycle for negligible space back. Only
+    # applies when allow_same_tier_downgrades is on.
+    "same_tier_min_reduction_pct": 50.0,
 
     # A demotion grab can fail permanently -- most often the chosen release was
     # pulled from the indexer (Newznab error 300 "No such file"), so re-grabbing

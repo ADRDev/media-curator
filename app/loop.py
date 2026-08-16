@@ -259,7 +259,8 @@ def _tier_ladder(profile: dict, current_tier: str | None, depth: int,
 
 
 def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
-                  max_bytes: int | None = None) -> tuple[dict | None, str | None]:
+                  max_bytes: int | None = None, same_tier: str | None = None,
+                  same_tier_min_reduction: float = 0.0) -> tuple[dict | None, str | None]:
     """Confirm a suitable release exists before touching anything.
 
     A release qualifies when its quality is one of `tiers` and its *only*
@@ -272,6 +273,15 @@ def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
     reached when nothing better exists. Returns (release, tier_it_matched), or
     (None, None) when the whole ladder comes up empty -- then the title is
     skipped and nothing is touched.
+
+    `same_tier`/`same_tier_min_reduction`: when a tier being tried matches
+    `same_tier` (the file's own current tier, only passed when same-tier
+    downgrades are enabled), a merely-smaller release isn't enough -- two
+    releases in one quality tier are often nearly the same size, so this
+    requires a real cut of at least `same_tier_min_reduction` (a 0..1
+    fraction of `max_bytes`) before it counts as a downgrade worth grabbing.
+    A true lower tier has no such floor; crossing tiers is categorically
+    smaller already.
     """
     try:
         releases = radarr.releases(movie_id)  # one indexer search for all tiers
@@ -288,8 +298,12 @@ def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
                 # A replacement no smaller than what's on disk reclaims nothing;
                 # dropping a tier is meant to save space, not just churn it.
                 size = int(r.get("size") or 0)
-                if max_bytes and size and size >= max_bytes:
-                    continue
+                if max_bytes and size:
+                    if size >= max_bytes:
+                        continue
+                    if same_tier and tier.lower() == same_tier.lower():
+                        if size > max_bytes * (1 - same_tier_min_reduction):
+                            continue
                 matches.append(r)
         if matches:
             # Prefer Radarr's own scoring, then availability.
@@ -351,12 +365,16 @@ def run_once(force: bool = False) -> dict:
     chosen = score.select_for_deficit(ranked, deficit, int(settings["batch_size"]))
 
     depth = int(settings.get("tier_fallback_depth", 0))
+    allow_same_tier = bool(settings.get("allow_same_tier_downgrades", False))
+    same_tier_min_reduction = float(
+        settings.get("same_tier_min_reduction_pct", 50.0)) / 100.0
     acted = []
     for c in chosen:
-        ladder = _tier_ladder(
-            profile, c.tier, depth,
-            bool(settings.get("allow_same_tier_downgrades", False)))
-        rel, tier = _pick_release(radarr, c.id, ladder, max_bytes=c.size)
+        ladder = _tier_ladder(profile, c.tier, depth, allow_same_tier)
+        rel, tier = _pick_release(
+            radarr, c.id, ladder, max_bytes=c.size,
+            same_tier=c.tier if allow_same_tier else None,
+            same_tier_min_reduction=same_tier_min_reduction)
         if not rel:
             db.record_action(movie_id=c.id, title=c.title, action="skip",
                              old_tier=c.tier, old_size=c.size, dry_run=dry,
@@ -364,6 +382,11 @@ def run_once(force: bool = False) -> dict:
                              detail=f"no release available in {'/'.join(ladder)}")
             continue
 
+        # The actual reclaim from the release _pick_release matched -- not
+        # c.reclaim, which is a cohort-median estimate from candidate ranking
+        # and can be wildly off for a same-tier pick (two same-tier releases
+        # can be nearly the same size, unlike a real tier drop).
+        actual_reclaim = c.size - int(rel.get("size") or 0)
         fallback = "" if tier == ladder[0] else f" (fell back from {ladder[0]})"
         aid = db.record_action(
             movie_id=c.id, title=c.title, action="demote", old_tier=c.tier,
@@ -371,12 +394,12 @@ def run_once(force: bool = False) -> dict:
             new_profile_id=profile["id"], release_guid=rel.get("guid"),
             dry_run=dry, status="pending",
             detail=f"-> {tier}{fallback} score={c.score:.3f} "
-                   f"reclaim={c.reclaim / GB:.1f}GB",
+                   f"reclaim={actual_reclaim / GB:.1f}GB",
         )
 
         if dry:
             db.update_action(aid, "dry-run")
-            acted.append({"title": c.title, "reclaim_gb": c.reclaim / GB,
+            acted.append({"title": c.title, "reclaim_gb": actual_reclaim / GB,
                           "score": c.score, "dry_run": True})
             continue
 
@@ -389,7 +412,7 @@ def run_once(force: bool = False) -> dict:
 
             radarr.grab(rel["guid"], rel.get("indexerId"))
             db.update_action(aid, "grabbed")
-            acted.append({"title": c.title, "reclaim_gb": c.reclaim / GB,
+            acted.append({"title": c.title, "reclaim_gb": actual_reclaim / GB,
                           "score": c.score, "dry_run": False})
         except Exception as e:  # noqa: BLE001
             db.update_action(aid, "failed", str(e)[:300])
@@ -533,10 +556,14 @@ def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
         mf = m.get("movieFile") or {}
         old_tier = ((mf.get("quality") or {}).get("quality") or {}).get("name")
         old_size = int(mf.get("size") or 0)
-        ladder = _tier_ladder(
-            profile, old_tier, depth,
-            bool((settings or {}).get("allow_same_tier_downgrades", False)))
-        rel, tier = _pick_release(radarr, m["id"], ladder, max_bytes=old_size)
+        allow_same_tier = bool((settings or {}).get("allow_same_tier_downgrades", False))
+        same_tier_min_reduction = float(
+            (settings or {}).get("same_tier_min_reduction_pct", 50.0)) / 100.0
+        ladder = _tier_ladder(profile, old_tier, depth, allow_same_tier)
+        rel, tier = _pick_release(
+            radarr, m["id"], ladder, max_bytes=old_size,
+            same_tier=old_tier if allow_same_tier else None,
+            same_tier_min_reduction=same_tier_min_reduction)
         if not rel:
             db.record_action(movie_id=m["id"], title=m.get("title"), action="skip",
                              old_tier=old_tier, old_size=old_size, dry_run=dry,
