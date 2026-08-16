@@ -228,7 +228,8 @@ def _rejection_is_soft(reason: str) -> bool:
     return any(m in r for m in _SOFT_REJECTION_MARKERS)
 
 
-def _tier_ladder(profile: dict, current_tier: str | None, depth: int) -> list[str]:
+def _tier_ladder(profile: dict, current_tier: str | None, depth: int,
+                 allow_same_tier: bool = False) -> list[str]:
     """The tiers a demotion may target, best first.
 
     The top allowed quality is the goal, but insisting on it was the reason a
@@ -238,16 +239,22 @@ def _tier_ladder(profile: dict, current_tier: str | None, depth: int) -> list[st
     acceptable for this archive profile, so a lower one is a worse outcome than
     the top tier but a far better one than keeping the 40 GB remux.
 
-    Two guards. The ladder stops above the file's current tier, so a "demotion"
-    can never grab something equal or better (a no-op that costs a download).
-    And `depth` caps how far it falls -- depth 0 restores the old
-    top-tier-or-nothing behaviour, so this is opt-out.
+    The ladder normally stops above the file's current tier, so a "demotion"
+    can never grab something equal or better. When `allow_same_tier` is on, the
+    current tier is prepended as an extra first option on top of that budget --
+    it doesn't eat into `depth`, so turning it on never shortens how far the
+    strict lower-tier fallback can still reach; `_pick_release` still requires
+    a smaller file for it to match. `depth` caps how far the walk falls below
+    the current tier -- depth 0 restores the old top-tier-or-nothing
+    behaviour, so this is opt-out.
     """
     ladder = [t for t in reversed(_profile_allowed(profile)) if t]
     if current_tier:
         lowered = [t.lower() for t in ladder]
         if current_tier.lower() in lowered:
-            ladder = ladder[lowered.index(current_tier.lower()) + 1:]
+            idx = lowered.index(current_tier.lower())
+            below = ladder[idx + 1:][:max(1, int(depth) + 1)]
+            return ([ladder[idx]] if allow_same_tier else []) + below
     return ladder[:max(1, int(depth) + 1)]
 
 
@@ -346,7 +353,9 @@ def run_once(force: bool = False) -> dict:
     depth = int(settings.get("tier_fallback_depth", 0))
     acted = []
     for c in chosen:
-        ladder = _tier_ladder(profile, c.tier, depth)
+        ladder = _tier_ladder(
+            profile, c.tier, depth,
+            bool(settings.get("allow_same_tier_downgrades", False)))
         rel, tier = _pick_release(radarr, c.id, ladder, max_bytes=c.size)
         if not rel:
             db.record_action(movie_id=c.id, title=c.title, action="skip",
@@ -512,7 +521,7 @@ def _protected_ids(radarr: Radarr, settings: dict, movies: list[dict]) -> set[in
 def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
                   queued: set[int], protected: set[int],
                   dry: bool, batch: int, throttle: float, depth: int = 0,
-                  max_failures: int = 0) -> dict:
+                  max_failures: int = 0, settings: dict | None = None) -> dict:
     """Force-grab the target tier for cutoff-unmet titles on one profile. No
     profile switch -- rules/user already assigned them; this is only the
     search+grab Radarr won't do automatically."""
@@ -524,7 +533,9 @@ def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
         mf = m.get("movieFile") or {}
         old_tier = ((mf.get("quality") or {}).get("quality") or {}).get("name")
         old_size = int(mf.get("size") or 0)
-        ladder = _tier_ladder(profile, old_tier, depth)
+        ladder = _tier_ladder(
+            profile, old_tier, depth,
+            bool((settings or {}).get("allow_same_tier_downgrades", False)))
         rel, tier = _pick_release(radarr, m["id"], ladder, max_bytes=old_size)
         if not rel:
             db.record_action(movie_id=m["id"], title=m.get("title"), action="skip",
@@ -582,7 +593,7 @@ def run_managed(force: bool = False) -> dict:
     for prof in managed_grab_profiles(radarr, settings):
         r = _grab_profile(radarr, prof, movies, queued, protected, dry, batch,
                           throttle, depth,
-                          int(settings.get("max_grab_failures", 3)))
+                          int(settings.get("max_grab_failures", 3)), settings)
         results.append(r)
         grabbed += len(r["grabbed"])
         remaining += r["remaining"]

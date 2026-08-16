@@ -31,10 +31,27 @@ check("depth 3 walks the profile's allowed list downward",
       == ["Bluray-1080p", "WEBDL-1080p", "WEBRip-1080p"])
 check("never offers a tier at or above the current file (no accidental upgrade)",
       loop._tier_ladder(ARCHIVE_HD, "WEBDL-1080p", 3) == ["WEBRip-1080p"])
+check("same-tier mode includes the current tier first",
+    loop._tier_ladder(ARCHIVE_HD, "Bluray-1080p", 3, True)
+    == ["Bluray-1080p", "WEBDL-1080p", "WEBRip-1080p"])
 check("file already at the bottom -> empty ladder, nothing to grab",
       loop._tier_ladder(ARCHIVE_HD, "WEBRip-1080p", 3) == [])
 check("empty ladder is handled, not an IndexError",
       loop._pick_release(FakeRadarrEmpty(), 1, []) == (None, None))
+
+# A profile with more tiers than depth+1 below the current one: same-tier is
+# an extra slot on top of the fallback budget, not a bite out of it -- turning
+# it on must not cost a lower-tier rung that was reachable without it.
+WIDE = {"id": 10, "name": "Wide", "items": [
+    {"quality": {"id": 1, "name": "WEBRip-1080p"}, "allowed": True},
+    {"quality": {"id": 2, "name": "WEBDL-1080p"}, "allowed": True},
+    {"quality": {"id": 3, "name": "Bluray-1080p"}, "allowed": True},
+    {"quality": {"id": 4, "name": "WEBDL-2160p"}, "allowed": True},
+    {"quality": {"id": 5, "name": "Bluray-2160p"}, "allowed": True},
+]}
+check("same-tier doesn't shrink the strict-lower-tier fallback budget",
+      loop._tier_ladder(WIDE, "Bluray-2160p", 1, True)
+      == ["Bluray-2160p", "WEBDL-2160p", "Bluray-1080p"])
 
 print("\n=== 2. release picking")
 def rel(tier, size_gb, rejections=(), score=0, seeders=10):
@@ -70,6 +87,20 @@ r, tier = loop._pick_release(
     FakeRadarr([rel("Bluray-1080p", 45)]), 1, ["Bluray-1080p"],
     max_bytes=int(39.5 * GB))
 check("refuses a replacement no smaller than the current file", r is None)
+
+# Same-tier downgrade: a smaller Bluray-1080p replaces a bigger Bluray-1080p.
+r, tier = loop._pick_release(
+    FakeRadarr([rel("Bluray-1080p", 4)]), 1,
+    loop._tier_ladder(ARCHIVE_HD, "Bluray-1080p", 3, True),
+    max_bytes=int(20 * GB))
+check("same-tier mode picks a smaller release in the same quality", tier == "Bluray-1080p")
+
+# The size guard still applies to a same-tier match -- no smaller, no grab.
+r, tier = loop._pick_release(
+    FakeRadarr([rel("Bluray-1080p", 25)]), 1,
+    loop._tier_ladder(ARCHIVE_HD, "Bluray-1080p", 3, True),
+    max_bytes=int(20 * GB))
+check("same-tier mode still refuses a same-or-larger replacement", r is None)
 
 print("\n=== 3. blocked-import detection")
 STUCK = {

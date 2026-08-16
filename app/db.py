@@ -51,9 +51,12 @@ DEFAULTS: dict[str, Any] = {
     # How many tiers BELOW a profile's top quality a demotion may fall when the
     # top tier has no release. 0 = top-tier-or-nothing (the old behaviour, which
     # stalled titles forever); 3 walks Bluray-1080p -> WEBDL-1080p -> WEBRip... .
-    # The ladder is the profile's own allowed list and never reaches the file's
-    # current tier, so it can only ever pick something smaller.
+    # The ladder is the profile's own allowed list. Same-tier selection is
+    # separately opt-in and still requires a smaller release.
     "tier_fallback_depth": 3,
+    # Allow a smaller release with the same quality tier as the current file.
+    # Off preserves strict tier downgrades only.
+    "allow_same_tier_downgrades": False,
 
     # A demotion grab can fail permanently -- most often the chosen release was
     # pulled from the indexer (Newznab error 300 "No such file"), so re-grabbing

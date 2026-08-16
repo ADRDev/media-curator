@@ -77,6 +77,10 @@
     <label><span>Max grab failures before auto-blocklist</span>
       <input type="number" name="max_grab_failures" min="0" value="{{ settings.max_grab_failures }}"></label>
   </div>
+  <label style="margin-top:12px">
+    <input type="checkbox" name="allow_same_tier_downgrades" {{ 'checked' if settings.allow_same_tier_downgrades }}>
+    Allow smaller releases within the current quality tier
+  </label>
   <p class="dim" style="margin:10px 0 0">
     <strong>Max grab failures</strong> is the circuit breaker for a demotion whose
     grab keeps failing &mdash; usually because the chosen release was pulled from
@@ -93,6 +97,12 @@
     it never demotes and never frees anything. The ladder is the profile's own
     allowed list, walked downward, and it stops above the file's current tier, so
     a fallback is always still a demotion.
+  </p>
+  <p class="dim" style="margin:10px 0 0">
+    <strong>Same-tier downgrades</strong> also considers a smaller release with the
+    same quality label, such as replacing a 20&nbsp;GB Bluray-1080p file with a
+    4&nbsp;GB Bluray-1080p release. The existing size check still rejects releases
+    that are not smaller.
   </p>
 </div>
 
