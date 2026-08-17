@@ -144,17 +144,39 @@ STALLED = {"movieId": 9, "downloadId": "E", "trackedDownloadState": "importBlock
            "trackedDownloadStatus": "warning",
            "statusMessages": [{"title": "x", "messages": ["No files found are eligible for import"]}],
            "movie": {"id": 9, "title": "Stalled", "qualityProfileId": 9}}
+# The same-tier downgrade version of the block: quality weight is a tie, so
+# Radarr falls back to Custom Format score instead -- different wording, same
+# stuck-import problem.
+CF_STUCK = {
+    "movieId": 43, "downloadId": "DEF456", "trackedDownloadState": "importPending",
+    "trackedDownloadStatus": "warning",
+    "statusMessages": [{"title": "Some Movie (2023) (1080p Bluray).mkv",
+                        "messages": ["Not a Custom Format upgrade for existing "
+                                     "movie file(s). New: [1080p Bluray, AAC, "
+                                     "Banned Groups] (-999799) do not improve on "
+                                     "Existing: [1080p Bluray, 1080p Quality Tier "
+                                     "1, DTS] (300)"]}],
+    "movie": {"id": 43, "title": "Some Movie", "qualityProfileId": 9},
+}
 
 class QRadarr:
     def __init__(self, recs): self._q = recs
     def queue(self, page_size=1000): return self._q
 
-found = importer.stuck_items(QRadarr([STUCK, UNRELATED, HEALTHY, STALLED]), {9})
+found = importer.stuck_items(
+    QRadarr([STUCK, UNRELATED, HEALTHY, STALLED, CF_STUCK]), {9})
 check("finds the downgrade-blocked item", any(r["movieId"] == 42 for r in found))
 check("ignores a movie on an unmanaged profile", not any(r["movieId"] == 7 for r in found))
 check("ignores a healthy download", not any(r["movieId"] == 8 for r in found))
 check("ignores a differently-blocked item", not any(r["movieId"] == 9 for r in found))
-check("exactly one match", len(found) == 1)
+check("finds the same-tier Custom Format-blocked item",
+      any(r["movieId"] == 43 for r in found))
+check("exactly two matches", len(found) == 2)
+
+found_strict = importer.stuck_items(
+    QRadarr([STUCK, UNRELATED, HEALTHY, STALLED, CF_STUCK]), {9}, upgrade_only=True)
+check("the CF rejection is the sole reason, so the unattended sweep clears it too",
+      any(r["movieId"] == 43 for r in found_strict))
 
 print("\n=== 4. force import: delete-then-import ordering")
 calls = []

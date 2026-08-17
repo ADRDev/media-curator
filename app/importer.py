@@ -17,6 +17,17 @@ import is refused, and the item parks in the queue waiting for a human to click
 through the manual-import dialog. Fifty times in one night, in this library's
 case.
 
+A same-tier downgrade hits a sibling version of the same problem. Quality
+WEIGHT is tied (Bluray-1080p vs. Bluray-1080p), so Radarr falls back to
+comparing Custom Format SCORE instead, and blocks with a differently worded
+message:
+
+    Not a Custom Format upgrade for existing movie file(s). New: [...]
+    (-999799) do not improve on Existing: [...] (300)
+
+Same failure mode, same fix -- delete then manual-import -- just a different
+rejection string to recognize.
+
 The fix
 -------
 Do exactly what that human did, on a schedule:
@@ -52,11 +63,15 @@ from .arr import Radarr, radarr_from_env
 GB = 1024 ** 3
 
 # Radarr phrases the block a few ways depending on version and whether the
-# comparison was against a file or a queued grab.
+# comparison was against a file or a queued grab -- and differently again when
+# it falls back to Custom Format score because quality weight was a tie (the
+# same-tier downgrade case).
 _UPGRADE_BLOCK_MARKERS = (
     "not an upgrade for existing movie file",
     "not an upgrade for existing",
     "existing quality",
+    "not a custom format upgrade for existing movie file",
+    "do not improve on existing",
 )
 
 
