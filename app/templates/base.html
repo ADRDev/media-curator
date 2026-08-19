@@ -150,6 +150,11 @@
     box.innerHTML = html;
   }
 
+  // Exposed so other pages (e.g. Candidates' selection-based downgrade,
+  // which posts its own ids rather than using the parameterless
+  // form[data-run] convention below) can render the same result card.
+  window.mcRunResult = render;
+
   document.querySelectorAll('form[data-run]').forEach(function (form) {
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();

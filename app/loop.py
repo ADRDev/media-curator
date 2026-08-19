@@ -335,41 +335,18 @@ def _blocklist_on_repeated_failure(movie_id: int, title: str | None,
     return True
 
 
-def run_once(force: bool = False) -> dict:
-    settings = db.all_settings()
-    dry = bool(settings.get("dry_run", True))
-    radarr = radarr_from_env()
-
-    st = status()
-    if not st["action_needed"] and not force:
-        db.log_run("loop", True, f"no action: projected free "
-                                 f"{st['projected_free_gb']:.0f} GB >= target")
-        return {"acted": False, "status": st, "reason": "at or above target"}
-
-    profile = find_archive_profile(radarr, settings["archive_profile_name"])
-    if not profile:
-        msg = (f"quality profile '{settings['archive_profile_name']}' not found "
-               "in Radarr -- create it first")
-        db.log_run("loop", False, msg)
-        raise LoopAbort(msg)
-
-    check = validate_archive_profile(profile, settings["archive_tier"])
-    if not check["ok"]:
-        db.log_run("loop", False, check["reason"])
-        raise LoopAbort(check["reason"])
-
-    built = build_candidates(settings, radarr)
-    ranked = built["ranked"]
-
-    deficit = int(st["deficit_gb"] * GB)
-    chosen = score.select_for_deficit(ranked, deficit, int(settings["batch_size"]))
-
+def _demote_candidates(radarr: Radarr, profile: dict, candidates: list,
+                       settings: dict, dry: bool) -> list[dict]:
+    """Run the tier-ladder / release-pick / grab path for each candidate in
+    order. Shared by the automatic loop (`run_once`) and manual, hand-picked
+    downgrades from the Candidates page (`run_selected`) so both go through
+    the exact same demotion mechanics."""
     depth = int(settings.get("tier_fallback_depth", 0))
     allow_same_tier = bool(settings.get("allow_same_tier_downgrades", False))
     same_tier_min_reduction = float(
         settings.get("same_tier_min_reduction_pct", 50.0)) / 100.0
     acted = []
-    for c in chosen:
+    for c in candidates:
         ladder = _tier_ladder(profile, c.tier, depth, allow_same_tier)
         rel, tier = _pick_release(
             radarr, c.id, ladder, max_bytes=c.size,
@@ -421,6 +398,45 @@ def run_once(force: bool = False) -> dict:
 
         time.sleep(float(settings["search_throttle_seconds"]))
 
+    return acted
+
+
+def _archive_profile_or_abort(radarr: Radarr, settings: dict) -> dict:
+    profile = find_archive_profile(radarr, settings["archive_profile_name"])
+    if not profile:
+        msg = (f"quality profile '{settings['archive_profile_name']}' not found "
+               "in Radarr -- create it first")
+        db.log_run("loop", False, msg)
+        raise LoopAbort(msg)
+
+    check = validate_archive_profile(profile, settings["archive_tier"])
+    if not check["ok"]:
+        db.log_run("loop", False, check["reason"])
+        raise LoopAbort(check["reason"])
+    return profile
+
+
+def run_once(force: bool = False) -> dict:
+    settings = db.all_settings()
+    dry = bool(settings.get("dry_run", True))
+    radarr = radarr_from_env()
+
+    st = status()
+    if not st["action_needed"] and not force:
+        db.log_run("loop", True, f"no action: projected free "
+                                 f"{st['projected_free_gb']:.0f} GB >= target")
+        return {"acted": False, "status": st, "reason": "at or above target"}
+
+    profile = _archive_profile_or_abort(radarr, settings)
+
+    built = build_candidates(settings, radarr)
+    ranked = built["ranked"]
+
+    deficit = int(st["deficit_gb"] * GB)
+    chosen = score.select_for_deficit(ranked, deficit, int(settings["batch_size"]))
+
+    acted = _demote_candidates(radarr, profile, chosen, settings, dry)
+
     summary = (f"{'DRY-RUN: ' if dry else ''}{len(acted)} demotion(s), "
                f"deficit {st['deficit_gb']:.0f} GB, "
                f"{len(ranked)} eligible candidates")
@@ -428,6 +444,33 @@ def run_once(force: bool = False) -> dict:
     return {"acted": True, "status": st, "chosen": acted,
             "eligible": len(ranked), "rejected": built["rejected"],
             "summary": summary}
+
+
+def run_selected(movie_ids: list[int]) -> dict:
+    """Downgrade specific candidates hand-picked on the Candidates page,
+    through the exact same tier-ladder / release-pick / grab path `run_once`
+    uses -- just without the deficit/batch-size gating that limits an
+    automatic pass, since a manual selection is already the user's own
+    budget."""
+    settings = db.all_settings()
+    dry = bool(settings.get("dry_run", True))
+    radarr = radarr_from_env()
+
+    profile = _archive_profile_or_abort(radarr, settings)
+
+    built = build_candidates(settings, radarr)
+    wanted = {int(i) for i in movie_ids}
+    chosen = [c for c in built["ranked"] if c.id in wanted]
+
+    acted = _demote_candidates(radarr, profile, chosen, settings, dry)
+
+    missing = len(wanted) - len(chosen)
+    summary = (f"{'DRY-RUN: ' if dry else ''}{len(acted)} downgrade(s) of "
+               f"{len(chosen)} selected"
+               + (f", {missing} no longer eligible" if missing else ""))
+    db.log_run("loop", True, summary)
+    return {"acted": True, "chosen": acted, "summary": summary,
+            "requested": len(wanted), "matched": len(chosen)}
 
 
 def _profile_allowed(profile: dict) -> list[str]:
