@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, Form, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -244,6 +245,27 @@ def candidates_page(request: Request):
         ctx["error"] = str(e)
         ctx["candidates"] = []
     return templates.TemplateResponse("candidates.html", ctx)
+
+
+@app.post("/candidates/downgrade")
+async def candidates_downgrade(request: Request):
+    form = await request.form()
+    try:
+        movie_ids = [int(v) for v in form.getlist("movie_id")]
+    except ValueError:
+        return JSONResponse({"error": "invalid movie_id"}, status_code=400)
+    if not movie_ids:
+        return JSONResponse({"error": "no candidates selected"}, status_code=400)
+    try:
+        # run_selected makes blocking Radarr HTTP calls and sleeps between
+        # grabs -- offload it so it doesn't stall the event loop the way a
+        # plain `await` on it would.
+        result = await run_in_threadpool(loop.run_selected, movie_ids)
+        return JSONResponse(result, status_code=200)
+    except loop.LoopAbort as e:
+        return JSONResponse({"error": str(e), "aborted": True}, status_code=409)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/blocklist", response_class=HTMLResponse)

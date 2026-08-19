@@ -45,14 +45,17 @@
     Nothing here has been acted on. Review before turning dry-run off &mdash; this is
     where the age-vs-classics tension shows up.
   </p>
+  <button type="button" class="downgrade-btn" disabled>Downgrade selected</button>
   <div class="scroll"><table>
     <tr>
+      <th></th>
       <th class="num">#</th><th>Title</th><th class="num">Size</th>
       <th class="num">Reclaim</th><th class="num">Released</th>
       <th class="num">Score</th><th>Breakdown</th><th></th>
     </tr>
     {% for c in candidates %}
     <tr>
+      <td><input type="checkbox" class="cand-check" value="{{ c.id }}"></td>
       <td class="num dim">{{ loop.index }}</td>
       <td>{{ c.title }}
         {% if c.release_basis != 'home' %}<span class="pill" title="no digital/physical release date">{{ c.release_basis }}</span>{% endif %}
@@ -79,6 +82,70 @@
     </tr>
     {% endfor %}
   </table></div>
+  <button type="button" class="downgrade-btn" disabled>Downgrade selected</button>
+  <div id="downgrade-result"></div>
 </div>
 {% endif %}
+
+<script>
+(function () {
+  function selectedIds() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('.cand-check'), function (c) { return c.checked; }
+    ).map(function (c) { return c.value; });
+  }
+  function refreshButtons() {
+    var any = selectedIds().length > 0;
+    document.querySelectorAll('.downgrade-btn').forEach(function (b) { b.disabled = !any; });
+  }
+  document.querySelectorAll('.cand-check').forEach(function (c) {
+    c.addEventListener('change', refreshButtons);
+  });
+
+  document.querySelectorAll('.downgrade-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var ids = selectedIds();
+      if (!ids.length) return;
+      if (!window.confirm('Downgrade ' + ids.length + ' selected title(s) now?')) return;
+
+      var allBtns = document.querySelectorAll('.downgrade-btn');
+      var labels = [];
+      allBtns.forEach(function (b, i) { labels[i] = b.textContent; b.disabled = true; b.textContent = 'Running…'; });
+
+      var box = document.getElementById('downgrade-result');
+      box.className = 'run-result running';
+      box.innerHTML = '<div class="panel"><h2>Running…</h2>' +
+        '<p class="dim" style="margin:0">Downgrading the selected titles &mdash; this can take a moment.</p></div>';
+
+      var body = new URLSearchParams();
+      ids.forEach(function (id) { body.append('movie_id', id); });
+
+      fetch('/candidates/downgrade', {
+        method: 'POST', headers: { 'Accept': 'application/json' }, body: body
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) { window.mcRunResult(box, res.data, res.ok); })
+        .catch(function (e) {
+          box.className = 'run-result';
+          box.innerHTML = '';
+          var panel = document.createElement('div');
+          panel.className = 'panel';
+          var h2 = document.createElement('h2');
+          h2.className = 'bad';
+          h2.textContent = 'Request failed';
+          var p = document.createElement('p');
+          p.style.margin = '0';
+          p.textContent = e && e.message ? e.message : String(e);
+          panel.appendChild(h2);
+          panel.appendChild(p);
+          box.appendChild(panel);
+        })
+        .then(function () {
+          allBtns.forEach(function (b, i) { b.textContent = labels[i]; });
+          refreshButtons();
+        });
+    });
+  });
+})();
+</script>
 {% endblock %}
