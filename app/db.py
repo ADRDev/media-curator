@@ -112,6 +112,28 @@ DEFAULTS: dict[str, Any] = {
     "audit_cron_day": "sun",
     "loop_interval_minutes": 60,
     "loop_enabled": False,
+
+    # --- TV (Sonarr) season downgrade -- mirrors the movie settings above,
+    # kept fully separate since a TV library's tiers/thresholds are tuned
+    # independently. Manual-only for now: no space-driven TV loop yet. ---
+    "tv_source_tiers": ["Remux-1080p"],
+    "tv_archive_tier": "WEBDL-1080p",
+    "tv_archive_profile_name": "Archive-TV",
+    "tv_tier_fallback_depth": 3,
+    "tv_allow_same_tier_downgrades": False,
+    "tv_same_tier_min_reduction_pct": 50.0,
+    # A season's age signal is its last-aired-episode date, not a release
+    # date -- a season finishing 2 years ago doesn't mean the show itself is
+    # done the way a movie is a one-shot, so this defaults shorter than the
+    # movie window.
+    "tv_new_release_window_months": 6,
+    "tv_w_impact": 1.0,
+    "tv_w_age": 0.5,
+    "tv_include_specials": False,
+    "tv_max_grab_failures": 3,
+    "tv_search_throttle_seconds": 20,
+    "tv_exclusion_tag": "curator-keep-tv",
+    "tv_archived_tag": "archived-tv",
 }
 
 
@@ -192,6 +214,20 @@ def init() -> None:
             added    REAL NOT NULL
         );
 
+        -- TV equivalent of blocklist. A separate table rather than reusing
+        -- blocklist: that table's movie_id PRIMARY KEY / upsert semantics
+        -- don't fit a (series, season, episode) key. episode_id NULL means
+        -- the whole season is blocked; set means just that one episode.
+        CREATE TABLE IF NOT EXISTS tv_blocklist (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_id     INTEGER NOT NULL,
+            season_number INTEGER NOT NULL,
+            episode_id    INTEGER,
+            series_title  TEXT,
+            reason        TEXT,
+            added         REAL NOT NULL
+        );
+
         -- Service connections (URL + API key), edited in the UI like other
         -- *ARR apps. Env vars are a fallback only; a DB value wins.
         CREATE TABLE IF NOT EXISTS connections (
@@ -215,8 +251,37 @@ def init() -> None:
 
         CREATE INDEX IF NOT EXISTS idx_manifest_ts ON manifest(ts DESC);
         CREATE INDEX IF NOT EXISTS idx_findings_klass ON findings(klass, dismissed);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tv_blocklist_key
+            ON tv_blocklist(series_id, season_number, COALESCE(episode_id, -1));
         """
     )
+    c.commit()
+
+    # manifest predates the TV feature and was never given these columns.
+    # CREATE TABLE IF NOT EXISTS is a no-op against an already-deployed DB
+    # file, so this migration is required (not just an offline fresh-install
+    # convenience) -- existing installs would otherwise crash on the first
+    # TV action with "no such column".
+    _ensure_columns("manifest", {
+        "kind": "TEXT NOT NULL DEFAULT 'movie'",
+        "series_id": "INTEGER",
+        "season_number": "INTEGER",
+        "episode_id": "INTEGER",
+    })
+    c.execute("CREATE INDEX IF NOT EXISTS idx_manifest_series "
+              "ON manifest(series_id, season_number)")
+    c.commit()
+
+
+def _ensure_columns(table: str, columns: dict[str, str]) -> None:
+    """Add any missing columns to an existing table. SQLite has no ADD COLUMN
+    IF NOT EXISTS, so check PRAGMA table_info first. Idempotent -- safe to
+    call on every startup."""
+    c = conn()
+    existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+    for name, coltype in columns.items():
+        if name not in existing:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
     c.commit()
 
 
@@ -311,9 +376,11 @@ def record_action(**kw: Any) -> int:
     c = conn()
     cur = c.execute(
         "INSERT INTO manifest(ts,movie_id,title,action,old_tier,old_size,"
-        "old_profile_id,new_profile_id,release_guid,dry_run,status,detail) "
+        "old_profile_id,new_profile_id,release_guid,dry_run,status,detail,"
+        "kind,series_id,season_number,episode_id) "
         "VALUES(:ts,:movie_id,:title,:action,:old_tier,:old_size,"
-        ":old_profile_id,:new_profile_id,:release_guid,:dry_run,:status,:detail)",
+        ":old_profile_id,:new_profile_id,:release_guid,:dry_run,:status,:detail,"
+        ":kind,:series_id,:season_number,:episode_id)",
         {
             "ts": time.time(),
             "movie_id": kw.get("movie_id"),
@@ -327,6 +394,10 @@ def record_action(**kw: Any) -> int:
             "dry_run": int(kw.get("dry_run", True)),
             "status": kw.get("status", "pending"),
             "detail": kw.get("detail"),
+            "kind": kw.get("kind", "movie"),
+            "series_id": kw.get("series_id"),
+            "season_number": kw.get("season_number"),
+            "episode_id": kw.get("episode_id"),
         },
     )
     c.commit()
@@ -358,6 +429,71 @@ def demote_failure_streak(movie_id: int) -> int:
             break
         n += 1
     return n
+
+
+def tv_episode_failure_streak(series_id: int, season_number: int,
+                              episode_id: int) -> int:
+    """Consecutive most-recent live per-episode demote attempts that failed.
+    Season-pack attempts don't get their own streak -- a pack that isn't
+    found or fails always falls through to the per-episode path in the same
+    run (see tv_loop._demote_season), so episode grain is the only grain
+    that needs a circuit breaker."""
+    rows = conn().execute(
+        "SELECT status FROM manifest WHERE series_id=? AND season_number=? "
+        "AND episode_id=? AND kind='tv' AND action='demote' AND dry_run=0 "
+        "ORDER BY ts DESC, id DESC",
+        (int(series_id), int(season_number), int(episode_id)),
+    ).fetchall()
+    n = 0
+    for r in rows:
+        if r["status"] != "failed":
+            break
+        n += 1
+    return n
+
+
+def tv_blocklist_add(series_id: int, season_number: int,
+                     episode_id: int | None = None,
+                     series_title: str | None = None,
+                     reason: str | None = None) -> None:
+    c = conn()
+    c.execute(
+        "INSERT INTO tv_blocklist(series_id,season_number,episode_id,"
+        "series_title,reason,added) VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(series_id,season_number,COALESCE(episode_id,-1)) DO UPDATE SET "
+        "series_title=excluded.series_title, "
+        "reason=COALESCE(excluded.reason, tv_blocklist.reason)",
+        (int(series_id), int(season_number),
+         int(episode_id) if episode_id is not None else None,
+         series_title, reason, time.time()),
+    )
+    c.commit()
+
+
+def tv_blocklist_remove(id_: int) -> None:
+    c = conn()
+    c.execute("DELETE FROM tv_blocklist WHERE id=?", (int(id_),))
+    c.commit()
+
+
+def tv_blocklist_all() -> list[sqlite3.Row]:
+    return conn().execute(
+        "SELECT * FROM tv_blocklist ORDER BY added DESC").fetchall()
+
+
+def tv_blocklist_season_ids() -> set[tuple[int, int]]:
+    """Whole-season blocks (episode_id IS NULL)."""
+    return {(int(r["series_id"]), int(r["season_number"]))
+            for r in conn().execute(
+                "SELECT series_id, season_number FROM tv_blocklist "
+                "WHERE episode_id IS NULL")}
+
+
+def tv_blocklist_episode_ids() -> set[tuple[int, int, int]]:
+    return {(int(r["series_id"]), int(r["season_number"]), int(r["episode_id"]))
+            for r in conn().execute(
+                "SELECT series_id, season_number, episode_id FROM tv_blocklist "
+                "WHERE episode_id IS NOT NULL")}
 
 
 def blocklist_add(movie_id: int, tmdb_id: int | None = None,

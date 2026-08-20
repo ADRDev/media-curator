@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="panel">
+  <h2>TV Blocklist &mdash; never demote</h2>
+  <p class="dim" style="margin-top:0">
+    A hard filter. Anything here is skipped regardless of score, the same as
+    carrying the <code>{{ settings.tv_exclusion_tag }}</code> tag in Sonarr &mdash;
+    but managed here. Blocking a whole season here also stops the per-episode
+    fallback for that season; use it for seasons you'd never want re-downloaded.
+  </p>
+  <form method="get" action="/tv-blocklist" style="display:flex; gap:8px; max-width:520px">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search your library by series title to add&hellip;">
+    <button type="submit">Search</button>
+  </form>
+</div>
+
+{% if q %}
+<div class="panel">
+  <h2>Matches for &ldquo;{{ q }}&rdquo;</h2>
+  {% if matches %}
+  <div class="scroll"><table>
+    <tr><th>Series</th><th></th></tr>
+    {% for s in matches %}
+    <tr>
+      <td>{{ s.title }}</td>
+      <td style="text-align:right">
+        <form method="post" action="/tv-blocklist/add" style="display:inline">
+          <input type="hidden" name="series_id" value="{{ s.id }}">
+          <input type="hidden" name="season_number" value="0">
+          <input type="hidden" name="series_title" value="{{ s.title }}">
+          <input type="hidden" name="reason" value="manual (all seasons)">
+          <input type="hidden" name="back" value="/tv-blocklist?q={{ q|urlencode }}">
+          <button type="submit" class="ghost" title="Blocks season 0 -- add other seasons from the TV Candidates page">Block season 0</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="dim">No matching series (or Sonarr is unreachable).</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Blocked ({{ rows|length }})</h2>
+  {% if rows %}
+  <div class="scroll"><table>
+    <tr><th>Series</th><th class="num">Season</th><th class="num">Episode</th>
+        <th>Reason</th><th>Added</th><th></th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.series_title or ('series #' ~ r.series_id) }}</td>
+      <td class="num dim">{{ r.season_number }}</td>
+      <td class="num dim">{{ r.episode_id or 'whole season' }}</td>
+      <td class="dim">{{ r.reason or '' }}</td>
+      <td class="dim">{{ r.added|int|datetimeformat }}</td>
+      <td style="text-align:right">
+        <form method="post" action="/tv-blocklist/remove/{{ r.id }}" style="display:inline">
+          <button type="submit" class="ghost">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="dim">Nothing blocked yet. Add seasons from the TV Candidates page, or search above.</p>
+  {% endif %}
+</div>
+
+{% endblock %}
