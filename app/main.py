@@ -13,8 +13,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import audit, db, importer, loop, space
-from .arr import radarr_from_env
+from . import audit, db, importer, loop, space, tv_loop
+from .arr import radarr_from_env, sonarr_from_env
 
 GB = 1024 ** 3
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -266,6 +266,91 @@ async def candidates_downgrade(request: Request):
         return JSONResponse({"error": str(e), "aborted": True}, status_code=409)
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/tv-candidates", response_class=HTMLResponse)
+def tv_candidates_page(request: Request):
+    ctx: dict = {"request": request, "page": "tv_candidates", "error": None,
+                 "settings": db.all_settings()}
+    try:
+        s = db.all_settings()
+        built = tv_loop.build_season_candidates(s, sonarr_from_env())
+        ranked = built["ranked"]
+        ctx["rejected"] = built["rejected"]
+        ctx["target_gb"] = built["target_per_episode_bytes"] / GB
+        ctx["candidates"] = ranked[:100]
+        ctx["total_eligible"] = len(ranked)
+        ctx["total_reclaim_gb"] = sum(c.reclaim for c in ranked) / GB
+    except Exception as e:  # noqa: BLE001
+        ctx["error"] = str(e)
+        ctx["candidates"] = []
+    return templates.TemplateResponse("tv_candidates.html", ctx)
+
+
+@app.post("/tv-candidates/downgrade")
+async def tv_candidates_downgrade(request: Request):
+    form = await request.form()
+    try:
+        pairs = []
+        for v in form.getlist("season_key"):
+            sid, sn = str(v).split(":", 1)
+            pairs.append((int(sid), int(sn)))
+    except ValueError:
+        return JSONResponse({"error": "invalid season_key"}, status_code=400)
+    if not pairs:
+        return JSONResponse({"error": "no seasons selected"}, status_code=400)
+    try:
+        # run_selected makes blocking Sonarr HTTP calls and sleeps between
+        # grabs -- offload it so it doesn't stall the event loop.
+        result = await run_in_threadpool(tv_loop.run_selected, pairs)
+        return JSONResponse(result, status_code=200)
+    except tv_loop.TvLoopAbort as e:
+        return JSONResponse({"error": str(e), "aborted": True}, status_code=409)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/tv-blocklist", response_class=HTMLResponse)
+def tv_blocklist_page(request: Request, q: str = ""):
+    rows = db.tv_blocklist_all()
+    matches = []
+    if q.strip():
+        try:
+            ql = q.strip().lower()
+            for s in audit.cached_series(sonarr_from_env()):
+                if ql in str(s.get("title", "")).lower():
+                    matches.append(s)
+            matches = sorted(matches, key=lambda s: s.get("title", ""))[:25]
+        except Exception:  # noqa: BLE001
+            matches = []
+    return templates.TemplateResponse("tv_blocklist.html", {
+        "request": request, "page": "tv_blocklist", "rows": rows,
+        "q": q, "matches": matches, "settings": db.all_settings(),
+    })
+
+
+@app.post("/tv-blocklist/add")
+async def tv_blocklist_add(request: Request):
+    form = await request.form()
+    try:
+        sid = int(str(form["series_id"]))
+        sn = int(str(form["season_number"]))
+    except (KeyError, ValueError):
+        return RedirectResponse("/tv-blocklist", status_code=303)
+    db.tv_blocklist_add(
+        series_id=sid,
+        season_number=sn,
+        episode_id=int(form["episode_id"]) if form.get("episode_id") else None,
+        series_title=str(form.get("series_title") or "") or None,
+        reason=str(form.get("reason") or "") or None,
+    )
+    return RedirectResponse(str(form.get("back") or "/tv-blocklist"), status_code=303)
+
+
+@app.post("/tv-blocklist/remove/{id}")
+def tv_blocklist_remove(id: int):
+    db.tv_blocklist_remove(id)
+    return RedirectResponse("/tv-blocklist", status_code=303)
 
 
 @app.get("/blocklist", response_class=HTMLResponse)

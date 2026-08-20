@@ -4,7 +4,7 @@ import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ["MC_DB"] = os.path.join(tempfile.mkdtemp(), "verify.db")
 
-from app import db, importer, loop
+from app import db, importer, loop, tv_loop, tv_score
 db.init()
 GB = 1024**3
 P = lambda b: "\033[92mPASS\033[0m" if b else "\033[91mFAIL\033[0m"
@@ -218,6 +218,102 @@ calls.clear()
 res = importer.force_import(ImpRadarr(), STUCK, dry=True)
 check("dry run performs no delete/command",
       not any(c[0] in ("delete", "command") for c in calls))
+
+print("\n=== 6. TV season assembly")
+import datetime as _dt
+def _iso(days_ago):
+    return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days_ago)).isoformat()
+
+SERIES = {"id": 100, "title": "Test Show", "tags": [], "qualityProfileId": 1, "seasons": [
+    {"seasonNumber": 0, "statistics": {"previousAiring": _iso(1000), "nextAiring": None}},
+    {"seasonNumber": 1, "statistics": {"previousAiring": _iso(1000), "nextAiring": None}},
+    {"seasonNumber": 2, "statistics": {"previousAiring": _iso(10), "nextAiring": None}},
+    {"seasonNumber": 3, "statistics": {"previousAiring": _iso(1000), "nextAiring": _iso(-5)}},
+]}
+def epf(id_, season, size_gb, tier):
+    return {"id": id_, "seasonNumber": season, "size": int(size_gb * GB),
+            "quality": {"quality": {"name": tier}}}
+
+TV_FILES = [
+    epf(1, 0, 3, "Remux-1080p"),
+    epf(2, 1, 3, "Remux-1080p"), epf(3, 1, 3, "Remux-1080p"),          # clean season, old enough
+    epf(4, 2, 3, "Remux-1080p"),                                       # recent -- window should exclude
+    epf(5, 3, 3, "Remux-1080p"),                                       # still airing -- excluded regardless of age
+    epf(6, 1, 1, "WEBDL-1080p"),                                       # wrong tier -> not in season 1's source_files
+]
+seasons = tv_score.assemble_seasons(SERIES, TV_FILES, {"Remux-1080p"})
+check("one SeasonCandidate per season number present", len(seasons) == 4)
+s1 = next(s for s in seasons if s.season_number == 1)
+check("season 1 groups only its own episode files as source", len(s1.source_files) == 2)
+check("season 1 size is the sum of its source files only", s1.size == int(6 * GB))
+check("season 1 not clean -- has a non-source-tier file (id=6) alongside it",
+      s1.clean is False)
+s0 = next(s for s in seasons if s.season_number == 0)
+check("season 0 (specials) is clean -- its only file is source-tier", s0.clean is True)
+
+print("\n=== 7. TV eligibility filters")
+cands, rej = tv_score.eligible(
+    seasons, {"tv_new_release_window_months": 6, "tv_include_specials": False},
+    exclusion_tag_id=None, expected_per_episode_bytes=int(1 * GB))
+kept = {c.season_number for c in cands}
+check("season 0 excluded by default (specials)", 0 not in kept)
+check("season 1 (old, clean-ish, has gain) is eligible", 1 in kept)
+check("season 2 excluded -- aired inside the new-release window", 2 not in kept)
+check("season 3 excluded -- still airing (nextAiring set)", 3 not in kept)
+check("rejection counters attribute correctly",
+      rej["specials_excluded"] == 1 and rej["inside_new_release_window"] == 1
+      and rej["still_airing"] == 1)
+
+cands2, rej2 = tv_score.eligible(
+    seasons, {"tv_new_release_window_months": 6, "tv_include_specials": False},
+    exclusion_tag_id=None, expected_per_episode_bytes=int(1 * GB),
+    season_blocklist={(100, 1)})
+check("season blocklist removes an otherwise-eligible season",
+      1 not in {c.season_number for c in cands2} and rej2["season_blocklisted"] == 1)
+
+cands3, rej3 = tv_score.eligible(
+    seasons, {"tv_new_release_window_months": 6, "tv_include_specials": False},
+    exclusion_tag_id=None, expected_per_episode_bytes=int(100 * GB))
+check("no_gain fires when the expected target exceeds the season's own size",
+      1 not in {c.season_number for c in cands3} and rej3["no_gain"] >= 1)
+
+print("\n=== 8. TV ranking")
+ranked = tv_score.rank(list(cands), {"tv_w_impact": 1.0, "tv_w_age": 0.5})
+check("rank() returns candidates sorted by descending score",
+      all(ranked[i].score >= ranked[i + 1].score for i in range(len(ranked) - 1)))
+
+print("\n=== 9. TV release picking -- season pack vs per-episode fallback")
+def tv_rel(tier, size_gb, full_season=False, rejections=(), score=0, seeders=10):
+    return {"guid": f"g-{tier}-{size_gb}-{full_season}", "indexerId": 1,
+            "quality": {"quality": {"name": tier}}, "size": int(size_gb * GB),
+            "fullSeason": full_season, "rejections": list(rejections),
+            "customFormatScore": score, "seeders": seeders}
+
+class FakeSonarrSeason:
+    """Mixed season-pack + per-episode results, as a real seasonNumber= search
+    is expected to return (see tv_loop.py's noted open risk to verify live)."""
+    def releases(self, series_id, season_number=None, episode_id=None):
+        return [
+            tv_rel("WEBDL-1080p", 4, full_season=True),
+            tv_rel("WEBDL-1080p", 1.9, full_season=False),  # a per-episode result mixed in
+        ]
+
+rel, tier = tv_loop._pick_season_release(
+    FakeSonarrSeason(), 100, 1, ["WEBDL-1080p"], max_bytes=int(6 * GB))
+check("season-pack picker only considers fullSeason releases", rel is not None and rel["fullSeason"])
+
+class FakeSonarrNoPack:
+    def releases(self, series_id, season_number=None, episode_id=None):
+        return [tv_rel("WEBDL-1080p", 1.9, full_season=False)]
+
+rel, tier = tv_loop._pick_season_release(
+    FakeSonarrNoPack(), 100, 1, ["WEBDL-1080p"], max_bytes=int(6 * GB))
+check("no season pack available -> season picker returns nothing (caller falls back per-episode)",
+      rel is None)
+
+rel, tier = tv_loop._pick_episode_release(
+    FakeSonarrNoPack(), 100, 55, ["WEBDL-1080p"], max_bytes=int(3 * GB))
+check("per-episode picker finds a qualifying single-episode release", rel is not None and tier == "WEBDL-1080p")
 
 print()
 print("\033[91m%d FAILURE(S)\033[0m" % len(fails) if fails else "\033[92mall passed\033[0m")

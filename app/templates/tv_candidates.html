@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block body %}
+
+{% if error %}
+<div class="note bad"><strong>Cannot rank TV candidates.</strong> {{ error }}</div>
+{% else %}
+
+<div class="panel">
+  <h2>Eligible for demotion</h2>
+  <div class="grid">
+    <div><div class="dim">Eligible seasons</div><div class="big">{{ total_eligible }}</div></div>
+    <div><div class="dim">Total reclaimable</div>
+      <div class="big">{{ '{:,.0f}'.format(total_reclaim_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+    <div><div class="dim">Expected size per episode after</div>
+      <div class="big">{{ '%.2f'|format(target_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+  </div>
+  <p class="dim" style="margin-bottom:0">
+    Expected size is the measured median of your own {{ settings.tv_archive_tier }} episodes,
+    multiplied by each season's episode count. Ranking is by reclaimable bytes and
+    last-aired date only.
+  </p>
+</div>
+
+{% if rejected %}
+<div class="panel">
+  <h2>Excluded by hard filters</h2>
+  <table>
+    <tr><td>Inside new-release window</td><td class="num">{{ rejected.inside_new_release_window }}</td>
+      <td class="dim">protected &mdash; season aired recently</td></tr>
+    <tr><td>Still airing</td><td class="num">{{ rejected.still_airing }}</td>
+      <td class="dim">has a scheduled future episode</td></tr>
+    <tr><td>On the TV blocklist</td><td class="num">{{ rejected.season_blocklisted }}</td>
+      <td class="dim">never demote &mdash; <a href="/tv-blocklist" style="color:var(--accent)">manage</a></td></tr>
+    <tr><td>Carries the exclusion tag</td><td class="num">{{ rejected.excluded_tag }}</td>
+      <td class="dim">{{ settings.tv_exclusion_tag }}</td></tr>
+    <tr><td>Specials excluded</td><td class="num">{{ rejected.specials_excluded }}</td>
+      <td class="dim">season 0 &mdash; enable in Settings to include</td></tr>
+    <tr><td>No gain from demoting</td><td class="num">{{ rejected.no_gain }}</td>
+      <td class="dim">already at or below target size</td></tr>
+    <tr><td>No source-tier files</td><td class="num">{{ rejected.no_files }}</td><td></td></tr>
+  </table>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Ranked &mdash; top {{ candidates|length }} of {{ total_eligible }}</h2>
+  <p class="dim" style="margin-top:0">
+    Nothing here has been acted on. A season with a full season-pack release
+    available is downgraded in one grab; otherwise episodes are searched and
+    grabbed individually, so a season can partially succeed.
+  </p>
+  <button type="button" class="downgrade-btn" disabled>Downgrade selected</button>
+  <div class="scroll"><table>
+    <tr>
+      <th></th>
+      <th class="num">#</th><th>Series &mdash; Season</th><th>Tier</th><th class="num">Size</th>
+      <th class="num">Reclaim</th><th class="num">Last aired</th>
+      <th class="num">Score</th><th>Breakdown</th><th></th>
+    </tr>
+    {% for c in candidates %}
+    <tr>
+      <td><input type="checkbox" class="cand-check" value="{{ c.series_id }}:{{ c.season_number }}"></td>
+      <td class="num dim">{{ loop.index }}</td>
+      <td>{{ c.title }}
+        {% if not c.clean %}<span class="pill" title="no clean season pack -- episode-by-episode fallback only">fallback</span>{% endif %}
+      </td>
+      <td class="dim">{{ c.tier or 'mixed' }}</td>
+      <td class="num">{{ '%.1f'|format(c.size/1024**3) }} GB</td>
+      <td class="num good">{{ '%.1f'|format(c.reclaim/1024**3) }} GB</td>
+      <td class="num dim">{{ c.last_aired_ts|int|datetimeformat if c.last_aired_ts else '&mdash;'|safe }}</td>
+      <td class="num"><strong>{{ '%.3f'|format(c.score) }}</strong></td>
+      <td style="min-width:160px">
+        <div class="bar" title="impact {{ '%.2f'|format(c.components.impact) }}">
+          <i style="width:{{ (c.components.impact*100)|round }}%"></i></div>
+      </td>
+      <td style="text-align:right">
+        <form method="post" action="/tv-blocklist/add" style="display:inline">
+          <input type="hidden" name="series_id" value="{{ c.series_id }}">
+          <input type="hidden" name="season_number" value="{{ c.season_number }}">
+          <input type="hidden" name="series_title" value="{{ c.series.title }}">
+          <input type="hidden" name="reason" value="never demote">
+          <input type="hidden" name="back" value="/tv-candidates">
+          <button type="submit" class="ghost" title="Never demote this season">Block</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  <button type="button" class="downgrade-btn" disabled>Downgrade selected</button>
+  <div id="downgrade-result"></div>
+</div>
+{% endif %}
+
+<script>
+(function () {
+  function selectedKeys() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('.cand-check'), function (c) { return c.checked; }
+    ).map(function (c) { return c.value; });
+  }
+  function refreshButtons() {
+    var any = selectedKeys().length > 0;
+    document.querySelectorAll('.downgrade-btn').forEach(function (b) { b.disabled = !any; });
+  }
+  document.querySelectorAll('.cand-check').forEach(function (c) {
+    c.addEventListener('change', refreshButtons);
+  });
+
+  document.querySelectorAll('.downgrade-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var keys = selectedKeys();
+      if (!keys.length) return;
+      if (!window.confirm('Downgrade ' + keys.length + ' selected season(s) now?')) return;
+
+      var allBtns = document.querySelectorAll('.downgrade-btn');
+      var labels = [];
+      allBtns.forEach(function (b, i) { labels[i] = b.textContent; b.disabled = true; b.textContent = 'Running…'; });
+
+      var box = document.getElementById('downgrade-result');
+      box.className = 'run-result running';
+      box.innerHTML = '<div class="panel"><h2>Running…</h2>' +
+        '<p class="dim" style="margin:0">Downgrading the selected seasons &mdash; this can take a moment.</p></div>';
+
+      var body = new URLSearchParams();
+      keys.forEach(function (k) { body.append('season_key', k); });
+
+      fetch('/tv-candidates/downgrade', {
+        method: 'POST', headers: { 'Accept': 'application/json' }, body: body
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) { window.mcRunResult(box, res.data, res.ok); })
+        .catch(function (e) {
+          box.className = 'run-result';
+          box.innerHTML = '';
+          var panel = document.createElement('div');
+          panel.className = 'panel';
+          var h2 = document.createElement('h2');
+          h2.className = 'bad';
+          h2.textContent = 'Request failed';
+          var p = document.createElement('p');
+          p.style.margin = '0';
+          p.textContent = e && e.message ? e.message : String(e);
+          panel.appendChild(h2);
+          panel.appendChild(p);
+          box.appendChild(panel);
+        })
+        .then(function () {
+          allBtns.forEach(function (b, i) { b.textContent = labels[i]; });
+          refreshButtons();
+        });
+    });
+  });
+})();
+</script>
+{% endblock %}

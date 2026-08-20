@@ -116,6 +116,61 @@
 </div>
 
 <div class="panel">
+  <h2>TV (Sonarr) demotion</h2>
+  <p class="dim" style="margin-top:0">
+    Season-based, manual-only for now &mdash; select seasons on the TV Candidates
+    page and downgrade them there. Fully separate tunables from the movie
+    settings above, since a TV library's tiers are usually different.
+  </p>
+  <div class="grid">
+    <label><span>Source tiers (comma separated)</span>
+      <input type="text" name="tv_source_tiers" value="{{ settings.tv_source_tiers|join(', ') }}"></label>
+    <label><span>Archive target tier</span>
+      <input type="text" name="tv_archive_tier" value="{{ settings.tv_archive_tier }}"></label>
+    <label><span>Archive quality profile name</span>
+      <input type="text" name="tv_archive_profile_name" value="{{ settings.tv_archive_profile_name }}"></label>
+    <label><span>Throttle between grabs (seconds)</span>
+      <input type="number" name="tv_search_throttle_seconds" value="{{ settings.tv_search_throttle_seconds }}"></label>
+    <label><span>Tier fallback depth</span>
+      <input type="number" name="tv_tier_fallback_depth" min="0" value="{{ settings.tv_tier_fallback_depth }}"></label>
+    <label><span>Max grab failures before auto-blocklist (per episode)</span>
+      <input type="number" name="tv_max_grab_failures" min="0" value="{{ settings.tv_max_grab_failures }}"></label>
+    <label><span>New-release window (months)</span>
+      <input type="number" name="tv_new_release_window_months" value="{{ settings.tv_new_release_window_months }}"></label>
+    <label><span>Exclusion tag (never demoted)</span>
+      <input type="text" name="tv_exclusion_tag" value="{{ settings.tv_exclusion_tag }}"></label>
+    <label><span>Tag applied on demotion</span>
+      <input type="text" name="tv_archived_tag" value="{{ settings.tv_archived_tag }}"></label>
+  </div>
+  <label style="margin-top:12px">
+    <input type="checkbox" name="tv_allow_same_tier_downgrades" {{ 'checked' if settings.tv_allow_same_tier_downgrades }}>
+    Allow smaller releases within the current quality tier
+  </label>
+  <div class="grid" style="margin-top:12px">
+    <label><span>Same-tier minimum size reduction (%)</span>
+      <input type="number" name="tv_same_tier_min_reduction_pct" min="0" max="99" step="1"
+             value="{{ settings.tv_same_tier_min_reduction_pct }}"></label>
+  </div>
+  <label style="margin-top:12px">
+    <input type="checkbox" name="tv_include_specials" {{ 'checked' if settings.tv_include_specials }}>
+    Include season 0 (specials) as a candidate
+  </label>
+  <div class="grid" style="margin-top:12px">
+    <label><span>Score weight &mdash; impact</span>
+      <input type="text" name="tv_w_impact" value="{{ settings.tv_w_impact }}"></label>
+    <label><span>Score weight &mdash; age</span>
+      <input type="text" name="tv_w_age" value="{{ settings.tv_w_age }}"></label>
+  </div>
+  <p class="dim" style="margin:10px 0 0">
+    A season downgrade tries a single season-pack release first; when none
+    qualifies it falls back to searching and grabbing a smaller release for
+    each episode individually, so a season can partially succeed. The
+    per-episode circuit breaker (max grab failures) and blocklist both apply
+    at episode grain in that case &mdash; see the TV Blocklist page.
+  </p>
+</div>
+
+<div class="panel">
   <h2>Blocked imports</h2>
   <label>
     <input type="checkbox" name="auto_import_downgrades" {{ 'checked' if settings.auto_import_downgrades }}>

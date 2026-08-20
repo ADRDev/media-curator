@@ -131,8 +131,33 @@ class Sonarr(ArrClient):
     def series(self) -> list[dict]:
         return self.get("series") or []
 
+    def update_series(self, series: dict) -> dict:
+        return self.put(f"series/{series['id']}", json=series)
+
+    def episodes(self, series_id: int) -> list[dict]:
+        return self.get("episode", params={"seriesId": series_id}) or []
+
     def episode_files(self, series_id: int) -> list[dict]:
         return self.get("episodefile", params={"seriesId": series_id}) or []
+
+    def delete_episode_file(self, episode_file_id: int) -> Any:
+        return self.delete(f"episodefile/{int(episode_file_id)}")
+
+    def releases(self, series_id: int, season_number: int | None = None,
+                 episode_id: int | None = None) -> list[dict]:
+        """Season-level search (season_number) returns a mix of full-season-pack
+        and per-episode releases; episode-level search (episode_id) is used by
+        the per-episode fallback. Exactly one of the two must be given."""
+        params: dict[str, Any] = {"seriesId": series_id}
+        if episode_id is not None:
+            params["episodeId"] = episode_id
+        else:
+            params["seasonNumber"] = season_number
+        return self.get("release", params=params) or []
+
+    def grab(self, guid: str, indexer_id: int) -> Any:
+        """Force-grab a specific release -- same shape as Radarr.grab."""
+        return self.post("release", json={"guid": guid, "indexerId": indexer_id})
 
 
 def radarr_from_env() -> Radarr:

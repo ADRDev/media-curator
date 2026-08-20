@@ -39,6 +39,40 @@ def cache_age() -> float | None:
     return time.time() - _MOVIE_CACHE["ts"]
 
 
+# Same latency shape that made movies_only=True necessary for the movie
+# Candidates page (~13s render pulling ~12k episode files): building TV
+# season candidates needs one episode_files() call per series, so both the
+# series list and each series' episode files are cached with a short TTL.
+_SERIES_CACHE: dict = {"ts": 0.0, "series": None}
+SERIES_CACHE_TTL = 300.0
+_EPISODE_FILE_CACHE: dict[int, tuple[float, list[dict]]] = {}
+
+
+def cached_series(sonarr: Sonarr, ttl: float = SERIES_CACHE_TTL,
+                  force: bool = False) -> list[dict]:
+    now = time.time()
+    if (not force and _SERIES_CACHE["series"] is not None
+            and now - _SERIES_CACHE["ts"] < ttl):
+        return _SERIES_CACHE["series"]
+    sonarr.ping()
+    series = sonarr.series()
+    _SERIES_CACHE["series"] = series
+    _SERIES_CACHE["ts"] = now
+    return series
+
+
+def cached_episode_files(sonarr: Sonarr, series_id: int,
+                         ttl: float = SERIES_CACHE_TTL,
+                         force: bool = False) -> list[dict]:
+    now = time.time()
+    cached = _EPISODE_FILE_CACHE.get(series_id)
+    if not force and cached is not None and now - cached[0] < ttl:
+        return cached[1]
+    files = sonarr.episode_files(series_id)
+    _EPISODE_FILE_CACHE[series_id] = (now, files)
+    return files
+
+
 def inventory(radarr: Radarr | None = None,
               sonarr: Sonarr | None = None,
               use_cache: bool = False,
@@ -103,6 +137,21 @@ def archive_tier_median_bytes(records: list[dict], archive_tier: str) -> int:
              if r["kind"] == "movie" and r["tier"] == archive_tier and r["size"] > 0]
     if len(sizes) < 5:
         return int(14.6 * GB)  # measured library average, as a floor-fallback
+    return int(st.median(sizes))
+
+
+def tv_archive_tier_median_bytes(records: list[dict], archive_tier: str) -> int:
+    """Per-EPISODE median size of TV files already on the archive tier in
+    this library. A season's expected size after downgrade is this value
+    times its episode count -- same self-tuning-from-the-library principle
+    as archive_tier_median_bytes, just at per-episode grain since a season's
+    episode count varies.
+    """
+    sizes = [r["size"] for r in records
+             if r["kind"] == "tv" and r["tier"] == archive_tier and r["size"] > 0]
+    if len(sizes) < 5:
+        return int(1.5 * GB)  # conservative floor-fallback until the library
+                              # has enough archive-tier episodes to measure from
     return int(st.median(sizes))
 
 
